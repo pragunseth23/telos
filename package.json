@@ -1,0 +1,13 @@
+{
+  "name": "telos",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "web:dev": "python3 -m http.server 4173",
+    "start": "cargo tauri dev",
+    "tauri:dev": "cargo tauri dev",
+    "tauri:build": "cargo tauri build",
+    "test": "node --test tests/*.test.js"
+  }
+}

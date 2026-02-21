@@ -1,0 +1,21 @@
+node_modules/
+.DS_Store
+
+# Environment and secrets
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Runtime logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Legacy local context file (web fallback)
+data/context/*.json
+
+# Rust / Tauri
+src-tauri/target/
+src-tauri/gen/
