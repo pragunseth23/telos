@@ -851,28 +851,31 @@ async fn run_agent_execution_turn(
     });
   }
 
-  if payload.task.execution_mode.trim() == "Human" {
-    return Ok(AgentResponse {
-      status: "blocked".to_string(),
-      message: "Task is labeled Human-executable and cannot be fully automated.".to_string(),
-      approval_context: None,
-      result: None,
-      task_confidence_delta: None,
-      parent_confidence_delta: None,
-    });
-  }
-
   let requested_action = payload.requested_action.as_deref().unwrap_or("");
+  let is_attached_task_run = !requested_action.trim().is_empty();
 
-  if let Some(reason) = agent_execution_block_reason(&payload.task, requested_action) {
-    return Ok(AgentResponse {
-      status: "blocked".to_string(),
-      message: reason,
-      approval_context: None,
-      result: None,
-      task_confidence_delta: None,
-      parent_confidence_delta: None,
-    });
+  if !is_attached_task_run {
+    if payload.task.execution_mode.trim() == "Human" {
+      return Ok(AgentResponse {
+        status: "blocked".to_string(),
+        message: "Task is labeled Human-executable and cannot be fully automated.".to_string(),
+        approval_context: None,
+        result: None,
+        task_confidence_delta: None,
+        parent_confidence_delta: None,
+      });
+    }
+
+    if let Some(reason) = agent_execution_block_reason(&payload.task, requested_action) {
+      return Ok(AgentResponse {
+        status: "blocked".to_string(),
+        message: reason,
+        approval_context: None,
+        result: None,
+        task_confidence_delta: None,
+        parent_confidence_delta: None,
+      });
+    }
   }
 
   let needs_approval =

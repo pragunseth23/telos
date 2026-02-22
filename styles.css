@@ -1045,6 +1045,41 @@ button:disabled {
   gap: 0.46rem;
 }
 
+.agent-thinking-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 33;
+  display: grid;
+  place-items: center;
+  background: rgba(21, 39, 62, 0.2);
+  backdrop-filter: blur(2px);
+}
+
+.agent-thinking-dialog {
+  width: min(90vw, 360px);
+  padding: 0.88rem 0.94rem;
+  display: grid;
+  gap: 0.46rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--surface) 92%, #fff);
+  box-shadow: var(--shadow-md);
+  animation: reset-dialog-in 140ms ease-out both;
+}
+
+.agent-thinking-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.agent-thinking-header h3 {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 650;
+}
+
 .artifact-dialog-backdrop {
   position: fixed;
   inset: 0;

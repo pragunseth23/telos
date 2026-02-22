@@ -1052,7 +1052,9 @@ function hydrateState(savedState) {
       : [],
     summaries: Array.isArray(activeIdentity?.summaries) ? deepClone(activeIdentity.summaries) : [],
     selectedNodeId: activeIdentity?.selectedNodeId || rootNode?.id || null,
-    modelBusy: false,
+    chatBusy: false,
+    agentTaskRunning: false,
+    agentThinkingModalOpen: false,
     showWorkspaceResetConfirm: false,
     agentDocumentViewer: createEmptyAgentDocumentViewer(),
   };
@@ -1721,7 +1723,9 @@ function activateIdentity(identityId) {
   state.selectedNodeId = identity.selectedNodeId || rootNode?.id || null;
   state.onboardingCompleted = true;
   state.route = APP_ROUTES.WORKSPACE;
-  state.modelBusy = false;
+  state.chatBusy = false;
+  state.agentTaskRunning = false;
+  state.agentThinkingModalOpen = false;
 
   scrollState.workspace.scrollTop = 0;
   scrollState.workspace.stickToBottom = true;
@@ -2298,6 +2302,22 @@ function renderIdentityHome() {
       <section class="${galleryClass} reveal delay-1">
         ${cardsMarkup}
       </section>
+      ${
+        state.showWorkspaceResetConfirm
+          ? `
+            <div class="reset-dialog-backdrop" id="home-reset-dialog-backdrop">
+              <div class="reset-dialog" role="dialog" aria-modal="true" aria-label="Confirm reset">
+                <h3>Reset Telos?</h3>
+                <p class="subtle">This clears all lenses and restarts onboarding.</p>
+                <div class="reset-dialog-actions">
+                  <button id="home-reset-cancel-btn" type="button">Cancel</button>
+                  <button id="home-reset-confirm-btn" class="danger-btn" type="button">Reset</button>
+                </div>
+              </div>
+            </div>
+          `
+          : ""
+      }
     </div>
   `;
 
@@ -2494,7 +2514,9 @@ async function restartOnboardingConversation() {
     state.taskResults = [];
     state.summaries = [];
     state.selectedNodeId = null;
-    state.modelBusy = false;
+    state.chatBusy = false;
+    state.agentTaskRunning = false;
+    state.agentThinkingModalOpen = false;
     state.graph.reset();
   }
   if (state.identityGraphs.length > 0) {
@@ -2713,6 +2735,24 @@ function finalizeOnboarding(profileFromModel) {
   render();
 }
 
+function renderAgentThinkingDialog() {
+  if (!state.agentTaskRunning || !state.agentThinkingModalOpen) {
+    return "";
+  }
+
+  return `
+    <div class="agent-thinking-backdrop" id="agent-thinking-backdrop">
+      <div class="agent-thinking-dialog" role="dialog" aria-modal="true" aria-label="Agent running">
+        <header class="agent-thinking-header">
+          <h3>Thinking</h3>
+          <button type="button" class="ghost-btn" id="agent-thinking-close-btn">Hide</button>
+        </header>
+        <p class="subtle">Telos is running the agent task in the background.</p>
+      </div>
+    </div>
+  `;
+}
+
 function renderAgentDocumentDialog() {
   const viewer = state.agentDocumentViewer;
   if (!viewer?.open) {
@@ -2851,6 +2891,7 @@ function renderWorkspace() {
         <section class="panel graph-panel">${renderGraphPanel(selectedNode)}</section>
         <aside class="panel chat-panel">${renderChatPanel()}</aside>
       </main>
+      ${renderAgentThinkingDialog()}
       ${renderAgentDocumentDialog()}
     </div>
   `;
@@ -3444,7 +3485,7 @@ function renderGraphPanel(selectedNode) {
 }
 
 function renderChatPanel() {
-  const isBusy = state.modelBusy;
+  const isBusy = state.chatBusy;
   return `
     <h3>Conversation</h3>
     <p class="subtle">Talk to Telos to prioritize, unblock work, and shape your next actions.</p>
@@ -3502,11 +3543,34 @@ function attachIdentityHomeHandlers() {
   });
 
   const homeResetButton = document.getElementById("home-reset-btn");
-  homeResetButton?.addEventListener("click", async () => {
-    const confirmed = window.confirm("Reset all Telos data and restart onboarding?");
-    if (!confirmed) {
+  homeResetButton?.addEventListener("click", () => {
+    state.showWorkspaceResetConfirm = true;
+    persistState();
+    render();
+  });
+
+  const homeResetCancelButton = document.getElementById("home-reset-cancel-btn");
+  homeResetCancelButton?.addEventListener("click", () => {
+    state.showWorkspaceResetConfirm = false;
+    persistState();
+    render();
+  });
+
+  const homeResetBackdrop = document.getElementById("home-reset-dialog-backdrop");
+  homeResetBackdrop?.addEventListener("click", (event) => {
+    if (event.target !== homeResetBackdrop) {
       return;
     }
+    state.showWorkspaceResetConfirm = false;
+    persistState();
+    render();
+  });
+
+  const homeResetConfirmButton = document.getElementById("home-reset-confirm-btn");
+  homeResetConfirmButton?.addEventListener("click", async () => {
+    state.showWorkspaceResetConfirm = false;
+    persistState();
+    render();
     await performGlobalResetAndReload();
   });
 }
@@ -3634,6 +3698,23 @@ function attachWorkspaceHandlers() {
       const selectedNode = state.graph.getNode(state.selectedNodeId);
       void openAgentDocumentViewer(resultId, selectedNode?.title || "Task Result");
     });
+  });
+
+  const thinkingCloseButton = document.getElementById("agent-thinking-close-btn");
+  thinkingCloseButton?.addEventListener("click", () => {
+    state.agentThinkingModalOpen = false;
+    persistState();
+    render();
+  });
+
+  const thinkingBackdrop = document.getElementById("agent-thinking-backdrop");
+  thinkingBackdrop?.addEventListener("click", (event) => {
+    if (event.target !== thinkingBackdrop) {
+      return;
+    }
+    state.agentThinkingModalOpen = false;
+    persistState();
+    render();
   });
 
   const artifactCloseButton = document.getElementById("artifact-close-btn");
@@ -3899,7 +3980,7 @@ function attachWorkspaceHandlers() {
 
 async function handleWorkspaceUserMessage(message) {
   addMessage("user", message);
-  state.modelBusy = true;
+  state.chatBusy = true;
   persistState();
   render();
 
@@ -3937,7 +4018,7 @@ async function handleWorkspaceUserMessage(message) {
       `Model unavailable: ${error instanceof Error ? error.message : String(error)}`
     );
   } finally {
-    state.modelBusy = false;
+    state.chatBusy = false;
     persistState();
     render();
   }
@@ -3945,6 +4026,13 @@ async function handleWorkspaceUserMessage(message) {
 
 async function runAgentTask(taskId, approvalToken = false, checklistItemId = "") {
   if (!taskId) {
+    return;
+  }
+
+  if (state.agentTaskRunning && !approvalToken) {
+    addMessage("system", "An agent task is already running.");
+    persistState();
+    render();
     return;
   }
 
@@ -3982,7 +4070,8 @@ async function runAgentTask(taskId, approvalToken = false, checklistItemId = "")
   }
 
   const parentNode = state.graph.getParent(taskId);
-  state.modelBusy = true;
+  state.agentTaskRunning = true;
+  state.agentThinkingModalOpen = true;
   persistState();
   render();
 
@@ -4093,7 +4182,8 @@ async function runAgentTask(taskId, approvalToken = false, checklistItemId = "")
       `Agent unavailable: ${error instanceof Error ? error.message : String(error)}`
     );
   } finally {
-    state.modelBusy = false;
+    state.agentTaskRunning = false;
+    state.agentThinkingModalOpen = false;
     persistState();
     render();
   }
