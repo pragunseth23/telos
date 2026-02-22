@@ -193,6 +193,9 @@ function normalizeGraphUpdate(rawUpdate) {
       ""
     ),
     description: toStringValue(update.description ?? update.details ?? update.note ?? update.reason, ""),
+    assignee: toStringValue(update.assignee ?? update.taskAssignee ?? update.task_assignee, "")
+      .trim()
+      .toLowerCase(),
   };
 }
 

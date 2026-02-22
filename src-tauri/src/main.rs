@@ -4,7 +4,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Manager, State};
 
@@ -1951,6 +1951,26 @@ fn sanitize_filename_component(raw: &str, fallback: &str) -> String {
   }
 }
 
+fn readable_run_stamp() -> String {
+  Utc::now().format("%Y-%m-%d_%H-%M").to_string()
+}
+
+fn next_available_child_path(parent: &Path, base_name: &str) -> PathBuf {
+  let mut attempt = 1usize;
+  loop {
+    let candidate_name = if attempt == 1 {
+      base_name.to_string()
+    } else {
+      format!("{base_name}-{:02}", attempt)
+    };
+    let candidate = parent.join(candidate_name);
+    if !candidate.exists() {
+      return candidate;
+    }
+    attempt += 1;
+  }
+}
+
 fn normalize_log_id(raw: &str) -> Result<String, String> {
   let trimmed = raw.trim();
   if trimmed.is_empty() {
@@ -2095,8 +2115,8 @@ fn persist_desktop_deliverables(
 ) -> Result<(PathBuf, Vec<String>), String> {
   let root_dir = desktop_deliverables_root(app)?;
   let task_slug = sanitize_filename_component(&payload.task.title, "task");
-  let run_folder_name = format!("{}__{}", result_payload.id, task_slug);
-  let run_folder = root_dir.join(run_folder_name);
+  let run_folder_name = format!("{}__{}", task_slug, readable_run_stamp());
+  let run_folder = next_available_child_path(&root_dir, &run_folder_name);
   fs::create_dir_all(&run_folder)
     .map_err(|e| format!("Failed to create deliverable run directory: {e}"))?;
 

@@ -1,98 +1,76 @@
-# Telos (Hackathon Build)
+# Telos
 
-Telos is a goal-aware desktop AI that turns your conversation into an Intent Graph, breaks long-term goals into concrete tasks, and executes the tasks you delegate.
+Telos is a desktop AI assistant that builds and maintains a personalized intent graph from conversation.
 
-## Product Goal
+The product is designed around one goal: give users more time for creative, human work by letting the agent execute routine, well-scoped tasks.
 
-Most assistants are stateless and chat-first. We wanted an assistant that is:
+## Product Flow
 
-- Identity-aware (who you are)
-- Goal-aware (where you want to go)
-- Action-aware (what to do next)
-- Constraint-aware (what it must not violate)
+1. **Conversational onboarding**
+   - User chats with Telos.
+   - Telos asks probing questions and builds context from natural responses.
+2. **Graph construction**
+   - Telos generates identity lenses and graph structure from onboarding context.
+3. **Execution workspace**
+   - User navigates Goals, Actions, and attached Tasks.
+   - Agent-assigned tasks can be run directly.
+   - Human-assigned tasks are tracked but not agent-runnable.
 
-So instead of a plain chat log, Telos maintains a structured Intent Graph and requires each agent run to produce an alignment explanation.
+## Core Model
 
-## What We Built
+- **Identity Lens**: a perspective like Student, Squash Player, Traveler.
+- **Goal**: long-horizon objective under a lens.
+- **Action**: concrete near-term action attached to a goal.
+- **Task**: attached checklist item under an action, assigned to either:
+  - `agent` (runnable)
+  - `human` (non-runnable)
 
-- Conversational onboarding that gathers identity, goals, values, constraints, tensions, and work style.
-- Automatic graph construction:
-  - `Root` node = identity
-  - `Goals` = long-horizon direction
-  - `Actions` = near-term execution
-- Workspace with 3 synchronized panels:
-  - Task execution panel
-  - Intent graph panel
-  - Conversation panel
-- Attached task checklist under each Action.
-- Single-agent execution for eligible tasks (research/synthesis type work).
-- Safety gating:
-  - Human-only tasks are blocked
-  - Vague tasks are blocked
-  - Irreversible actions require explicit approval
-- Intent Alignment Report for each execution:
-  - Nodes advanced
-  - Tensions activated
-  - Constraints approached/breached
-  - Reward signal
-- Persistent memory:
-  - App state in browser local storage
-  - Model context and agent run artifacts on disk (Tauri app data)
-- Multi-lens identity support (create/switch different identity lenses from Home).
+## Key UX + Behavior
 
-## Example Intent Graph
+- Multi-lens home with graph previews.
+- Workspace with:
+  - task panel
+  - force graph view
+  - conversation panel
+- Reset with confirmation.
+- No timestamp clutter in chat/task surfaces.
+- Agent execution available at task level only.
+- Task assignment visible on hover.
+- Goal completion is gated: a goal can be marked done only after all of its actions are completed.
 
-Example graph (nodes + directed edges):
+## Agent Execution + Deliverables
 
-```text
-Nodes:
-- R: Root identity = Student / Builder
-- G1: Goal = Get into college
-- G2: Goal = Build startup momentum
-- A1: Action = Build SAT prep system
-- A2: Action = Build scholarship application pipeline
-- A3: Action = Research competitors
-- A4: Action = Draft first user interview script
+When an agent task runs:
 
-Directed edges:
-- R -> G1
-- R -> G2
-- G1 -> A1
-- G1 -> A2
-- G2 -> A3
-- G2 -> A4
+- Telos generates a readable task result document.
+- Telos writes concrete deliverable files to Desktop.
+- Deliverables are saved under:
+  - `~/Desktop/Telos Deliverables/<task-slug>__<YYYY-MM-DD_HH-MM>/`
+  - Collision-safe suffixes are added only when needed (for example `-02`).
 
-Tension edge (conflict metadata):
-- G1 <-> G2  (example: "college outcomes vs startup velocity")
-```
+Generated files include:
 
-Execution in Telos runs on specific Actions and attached tasks, not on identity-level nodes.
+- One markdown file per deliverable
+- `task-result.md` summary in the same folder
 
-## Why We Made These Decisions
+The app also stores agent result documents in app data for in-app viewing.
 
-- Tauri + Rust backend:
-  - Keeps `OPENAI_API_KEY` out of frontend JS.
-  - Gives us local file persistence for model context and agent artifacts.
-- Structured JSON contracts for model output:
-  - The backend enforces parseable outputs for onboarding/workspace/agent turns.
-  - Reduces brittle prompt-only behavior during a hackathon timeline.
-- Goals vs Actions split:
-  - Keeps long-horizon intent separate from immediately executable work.
-  - Makes delegation boundaries clearer.
-- Strict agent eligibility policy:
-  - We only auto-run tasks that are specific, scoped, and synthesis-friendly.
-  - Avoids pretending to execute real-world human actions.
-- Approval gate for irreversible actions:
-  - Any task with destructive/irreversible language requires explicit confirmation.
-- Single-agent scope (for hackathon):
-  - We prioritized reliability, traceability, and end-to-end demo completeness over multi-agent complexity.
-- Local-first persistence:
-  - Faster iteration and predictable behavior during demos.
-  - No external database setup required.
+## Tech Stack
 
-## How To Run
+- **Desktop shell**: Tauri v2
+- **Frontend**: vanilla JS + HTML/CSS
+- **Backend**: Rust + Tauri commands
+- **Model API**: OpenAI Responses API
+- **Default model**: `gpt-5.2`
 
-1. Install prerequisites:
+Reasoning policy:
+
+- Onboarding/workspace chat: reasoning effort `none`
+- Agent execution: reasoning effort `low` (or `medium` when approval flow is used)
+
+## Setup
+
+### 1. Prerequisites
 
 - Node.js 18+
 - Rust toolchain
@@ -104,39 +82,49 @@ cargo install tauri-cli
 
 - Platform prerequisites from [Tauri v2 docs](https://v2.tauri.app/start/prerequisites/)
 
-2. Configure environment:
+### 2. Environment
 
 ```bash
 cp .env.example .env
 ```
 
-Set `OPENAI_API_KEY` in `.env` (optional: set `OPENAI_MODEL`, default is `gpt-5.2`).
+Set:
 
-3. Start the desktop app:
+- `OPENAI_API_KEY` (required)
+- `OPENAI_MODEL` (optional, defaults to `gpt-5.2`)
+
+### 3. Run
 
 ```bash
 npm run tauri:dev
 ```
 
-This runs the web frontend on `http://localhost:4173` and opens the Tauri desktop window.
+## Project Scripts
 
-## Persistence Paths
+- `npm run tauri:dev` — run desktop app in dev mode
+- `npm run tauri:build` — build desktop app
+- `npm test` — run Node test suite
 
-- Model context:
+## Persistence
+
+- Frontend app state: local storage
+- Backend context:
   - macOS: `~/Library/Application Support/com.telos.desktop/context/context.json`
   - Windows: `%APPDATA%/com.telos.desktop/context/context.json`
   - Linux: `~/.local/share/com.telos.desktop/context/context.json`
-- Agent output artifacts:
+- Agent result docs:
   - `<app_data_dir>/context/agent_runs/*.md`
-- Deliverable files (real task outputs):
-  - `~/Desktop/Telos Deliverables/<result_id>__<task_slug>/`
+- Desktop deliverables:
+  - `~/Desktop/Telos Deliverables/...`
 
-Use Reset in the UI to clear local app state and persisted model context.
+## Security Notes
+
+- Do not commit `.env`.
+- Keep API keys in environment variables only.
+- `.gitignore` is configured to exclude local secrets and build artifacts.
 
 ## Tests
 
 ```bash
 npm test
 ```
-
-Current tests cover graph construction/reward logic, onboarding parsing, agent execution policy, and API normalization contracts.

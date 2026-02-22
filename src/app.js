@@ -608,14 +608,14 @@ function buildSeededAttachedTasks(nodeTitle) {
       id: uid("check"),
       title: ensureAttachedTaskTitle("", focus, 1),
       done: false,
-      automatable: true,
+      assignee: TASK_ASSIGNEES.AGENT,
       status: "todo",
     },
     {
       id: uid("check"),
       title: ensureAttachedTaskTitle("", focus, 2),
       done: false,
-      automatable: true,
+      assignee: TASK_ASSIGNEES.AGENT,
       status: "todo",
     },
     {
@@ -625,7 +625,7 @@ function buildSeededAttachedTasks(nodeTitle) {
         "Complete One 60-Minute Creative Execution Block"
       ),
       done: false,
-      automatable: false,
+      assignee: TASK_ASSIGNEES.HUMAN,
       status: "todo",
     },
   ]);
@@ -1315,19 +1315,14 @@ function normalizeChecklistItems(rawItems) {
         status === "completed" || status === "running" || status === "blocked"
           ? status
           : "todo";
-      const automatable =
-        typeof item?.automatable === "boolean"
-          ? item.automatable
-          : evaluateAgentAutomationText(title, {
-              minWords: 3,
-              requireScope: false,
-            }).allowed;
+      const rawAutomatable = typeof item?.automatable === "boolean" ? item.automatable : null;
+      const assignee = normalizeTaskAssignee(item?.assignee, title, rawAutomatable);
       return {
         id: String(item?.id || uid("check")),
         title,
         done: Boolean(item?.done),
         status: Boolean(item?.done) ? "completed" : normalizedStatus,
-        automatable,
+        assignee,
         lastResultId: String(item?.lastResultId || item?.lastLogId || ""),
         lastRunAt: String(item?.lastRunAt || ""),
       };
@@ -1486,7 +1481,12 @@ function inferConversationGraphUpdates(message) {
     quotedTitle ||
     extractTitle(/\b(?:add|create|include|insert)\s+(?:a|an|new|another)?\s*(?:attached\s+)?task\s*(?:called|named|:|-)?\s*(.+)$/i);
   if (taskTitle && /\btask\b/i.test(text)) {
-    return [{ op: "add_attached_task", title: taskTitle }];
+    const assignee = /\bhuman|manually|myself|personally\b/i.test(text)
+      ? TASK_ASSIGNEES.HUMAN
+      : /\bagent|automate|automation|delegate\b/i.test(text)
+      ? TASK_ASSIGNEES.AGENT
+      : "";
+    return [{ op: "add_attached_task", title: taskTitle, assignee }];
   }
 
   return [];
@@ -1572,7 +1572,6 @@ function applyConversationGraphUpdates(updates, selectedNode) {
           confidenceScore: 0.58,
           emotionalValence: 0.1,
           constraints: Array.isArray(parentGoal.constraints) ? parentGoal.constraints : [],
-          executionMode: EXECUTION_MODES.HYBRID,
         },
         `Action added from conversation: ${title}`
       );
@@ -1595,10 +1594,7 @@ function applyConversationGraphUpdates(updates, selectedNode) {
         return;
       }
 
-      const automatable = evaluateAgentAutomationText(title, {
-        minWords: 3,
-        requireScope: false,
-      }).allowed;
+      const assignee = normalizeTaskAssignee(update?.assignee, title);
 
       updateSpeed1Checklist(
         targetAction.id,
@@ -1609,7 +1605,7 @@ function applyConversationGraphUpdates(updates, selectedNode) {
             title,
             done: false,
             status: "todo",
-            automatable,
+            assignee,
           },
         ],
         `Attached task added from conversation: ${title}`
@@ -2970,12 +2966,12 @@ function renderTaskPanel(selectedNode) {
 
       <div class="detail-grid">
         <div>
-          <p class="label">Execution Mode</p>
-          <p>${escapeHtml(selectedNode.executionMode || EXECUTION_MODES.HYBRID)}</p>
-        </div>
-        <div>
           <p class="label">Status</p>
           <p>${escapeHtml(selectedNode.status)}</p>
+        </div>
+        <div>
+          <p class="label">Attached Tasks</p>
+          <p>${escapeHtml(String(checklist.length))}</p>
         </div>
       </div>
 
@@ -3001,25 +2997,26 @@ function renderTaskPanel(selectedNode) {
                   ${checklist
                     .map((item) => {
                       const taskAutomation = evaluateAttachedTaskExecutability(selectedNode, item);
+                      const assignee = normalizeTaskAssignee(item?.assignee, item?.title);
+                      const assigneeLabel = taskAssigneeLabel(assignee);
+                      const assigneeHint = `Assigned to ${assigneeLabel}`;
                       const runButton = taskAutomation.allowed
                         ? `<button type="button" data-check-run="${selectedNode.id}|${item.id}">Run</button>`
                         : "";
                       return `
-                        <li class="checklist-row">
+                        <li class="checklist-row" data-assignee="${assignee}" title="${escapeHtml(
+                          assigneeHint
+                        )}">
                           <label>
                             <input
                               type="checkbox"
                               data-check-toggle="${selectedNode.id}|${item.id}"
                               ${item.done ? "checked" : ""}
                             />
-                            <span>${escapeHtml(item.title)}</span>
-                            ${
-                              taskAutomation.allowed
-                                ? ""
-                                : `<span class="subtle checklist-hint">${escapeHtml(
-                                    taskAutomation.reason
-                                  )}</span>`
-                            }
+                            <span class="checklist-title-wrap">
+                              <span>${escapeHtml(item.title)}</span>
+                              <span class="subtle task-assignee-hint">${escapeHtml(assigneeHint)}</span>
+                            </span>
                           </label>
                           <div class="checklist-actions">
                             ${runButton}
@@ -3816,10 +3813,17 @@ function attachWorkspaceHandlers() {
     }
 
     const formData = new FormData(checklistForm);
-    const title = String(formData.get("title") || "").trim();
-    if (!title) {
+    const rawTitle = String(formData.get("title") || "").trim();
+    if (!rawTitle) {
       return;
     }
+    const targetNode = state.graph.getNode(nodeId);
+    const normalizedTitle = ensureAttachedTaskTitle(
+      rawTitle,
+      String(targetNode?.title || ""),
+      getChecklistForNode(targetNode).length + 1
+    );
+    const assignee = inferTaskAssignee(normalizedTitle);
 
     updateSpeed1Checklist(
       nodeId,
@@ -3827,16 +3831,13 @@ function attachWorkspaceHandlers() {
         ...currentChecklist,
         {
           id: uid("check"),
-          title,
+          title: normalizedTitle,
           done: false,
           status: "todo",
-          automatable: evaluateAgentAutomationText(title, {
-            minWords: 3,
-            requireScope: false,
-          }).allowed,
+          assignee,
         },
       ],
-      `Attached task created for ${state.graph.getNode(nodeId)?.title || nodeId}: ${title}`
+      `Attached task created for ${state.graph.getNode(nodeId)?.title || nodeId}: ${normalizedTitle}`
     );
     persistState();
     render();

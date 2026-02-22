@@ -818,6 +818,14 @@ button:disabled {
   flex: 1;
 }
 
+.checklist-title-wrap {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.38rem;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
 .checklist-row input[type="checkbox"] {
   width: auto;
   margin: 0;
@@ -826,6 +834,19 @@ button:disabled {
 
 .checklist-hint {
   grid-column: 2;
+}
+
+.task-assignee-hint {
+  opacity: 0;
+  transform: translateY(-1px);
+  transition: opacity 140ms ease, transform 140ms ease;
+  white-space: nowrap;
+}
+
+.checklist-row:hover .task-assignee-hint,
+.checklist-row:focus-within .task-assignee-hint {
+  opacity: 1;
+  transform: translateY(0);
 }
 
 .checklist-actions {
