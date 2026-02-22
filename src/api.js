@@ -1,3 +1,5 @@
+import { normalizeTitleForDisplay } from "./naming.js";
+
 const PROFILE_FIELDS = [
   "aboutYourself",
   "roles",
@@ -115,6 +117,93 @@ function normalizeGraphContext(rawGraphContext) {
   };
 }
 
+function normalizeGraphUpdateOperation(rawOperation) {
+  const normalized = toStringValue(rawOperation, "")
+    .toLowerCase()
+    .replace(/[-\s]+/g, "_")
+    .trim();
+  if (!normalized) {
+    return "";
+  }
+
+  if (
+    ["add_speed2_goal", "add_goal", "new_goal", "add_long_goal", "add_long_horizon_goal"].includes(
+      normalized
+    )
+  ) {
+    return "add_speed2_goal";
+  }
+  if (
+    ["add_speed1_action", "add_action", "new_action", "add_speed1", "add_task_action"].includes(
+      normalized
+    )
+  ) {
+    return "add_speed1_action";
+  }
+  if (
+    [
+      "add_attached_task",
+      "add_task",
+      "new_task",
+      "add_checklist_item",
+      "add_checklist_task",
+    ].includes(normalized)
+  ) {
+    return "add_attached_task";
+  }
+
+  return "";
+}
+
+function normalizeGraphUpdate(rawUpdate) {
+  const update = toObject(rawUpdate);
+  const op = normalizeGraphUpdateOperation(
+    update.op ?? update.operation ?? update.type ?? update.kind
+  );
+  if (!op) {
+    return null;
+  }
+
+  const title = toStringValue(
+    update.title ?? update.nodeTitle ?? update.node_title ?? update.actionTitle ?? update.taskTitle,
+    ""
+  );
+  const normalizedTitle = normalizeTitleForDisplay(title, "");
+  if (!normalizedTitle) {
+    return null;
+  }
+
+  return {
+    op,
+    title: normalizedTitle,
+    parentGoal: normalizeTitleForDisplay(
+      toStringValue(update.parentGoal ?? update.parent_goal ?? update.goal ?? update.goalTitle, ""),
+      ""
+    ),
+    parentAction: normalizeTitleForDisplay(
+      toStringValue(
+        update.parentAction ??
+          update.parent_action ??
+          update.action ??
+          update.actionTitle ??
+          update.task ??
+          update.taskTitle,
+        ""
+      ),
+      ""
+    ),
+    description: toStringValue(update.description ?? update.details ?? update.note ?? update.reason, ""),
+  };
+}
+
+function normalizeGraphUpdates(rawUpdates) {
+  if (Array.isArray(rawUpdates)) {
+    return rawUpdates.map((entry) => normalizeGraphUpdate(entry)).filter(Boolean).slice(0, 8);
+  }
+  const single = normalizeGraphUpdate(rawUpdates);
+  return single ? [single] : [];
+}
+
 function normalizeOnboardingState(rawOnboarding) {
   const onboarding = toObject(rawOnboarding);
   return {
@@ -175,6 +264,13 @@ export function normalizeModelTurnResponse(rawResponse, phaseFallback = "workspa
       name: toStringValue(onboardingRaw.name, ""),
       profile: normalizeProfileSnapshot(onboardingRaw.profile),
     };
+  }
+
+  const graphUpdates = normalizeGraphUpdates(
+    response.graphUpdates ?? response.graph_updates ?? response.updates
+  );
+  if (graphUpdates.length > 0) {
+    normalized.graphUpdates = graphUpdates;
   }
 
   return normalized;
@@ -256,23 +352,26 @@ export function normalizeAgentRunResponse(rawResponse) {
     };
   }
 
-  if (response.log) {
-    const log = toObject(response.log);
-    const report = toObject(log.intentAlignmentReport ?? log.intent_alignment_report);
-    normalized.log = {
-      id: toStringValue(log.id, ""),
-      taskId: toStringValue(log.taskId ?? log.task_id, ""),
-      createdAt: toStringValue(log.createdAt ?? log.created_at, ""),
-      status: toStringValue(log.status, "unknown"),
-      executedBy: toStringValue(log.executedBy ?? log.executed_by, "telos-agent-1"),
+  const resultPayload = response.result ?? response.log;
+  if (resultPayload) {
+    const result = toObject(resultPayload);
+    const report = toObject(result.intentAlignmentReport ?? result.intent_alignment_report);
+    normalized.result = {
+      id: toStringValue(result.id, ""),
+      taskId: toStringValue(result.taskId ?? result.task_id, ""),
+      createdAt: toStringValue(result.createdAt ?? result.created_at, ""),
+      status: toStringValue(result.status, "unknown"),
+      executedBy: toStringValue(result.executedBy ?? result.executed_by, "telos-agent-1"),
       actionSummary: toStringValue(
-        log.actionSummary ?? log.action_summary,
+        result.actionSummary ?? result.action_summary,
         "Execution completed."
       ),
-      outputs: toStringList(log.outputs),
-      justification: toStringValue(log.justification, ""),
-      estimatedHours: toNumberValue(log.estimatedHours ?? log.estimated_hours, 0),
-      estimatedCost: toNumberValue(log.estimatedCost ?? log.estimated_cost, 0),
+      outputs: toStringList(result.outputs),
+      justification: toStringValue(result.justification, ""),
+      estimatedHours: toNumberValue(result.estimatedHours ?? result.estimated_hours, 0),
+      estimatedCost: toNumberValue(result.estimatedCost ?? result.estimated_cost, 0),
+      artifactPath: toStringValue(result.artifactPath ?? result.artifact_path, ""),
+      deliverablePaths: toStringList(result.deliverablePaths ?? result.deliverable_paths),
       intentAlignmentReport: {
         advancedNodes: Array.isArray(report.advancedNodes ?? report.advanced_nodes)
           ? (report.advancedNodes ?? report.advanced_nodes).map((entry) => {
@@ -305,6 +404,7 @@ export function normalizeAgentRunResponse(rawResponse) {
         reward: toNumberValue(report.reward, 0),
       },
     };
+    normalized.log = normalized.result;
   }
 
   if ("taskConfidenceDelta" in response || "task_confidence_delta" in response) {
@@ -374,4 +474,43 @@ export async function requestAgentRun(payload) {
     "Agent request failed with status"
   );
   return normalizeAgentRunResponse(raw);
+}
+
+function normalizeAgentResultDocumentResponse(rawResponse) {
+  const response = toObject(rawResponse);
+  return {
+    resultId: toStringValue(
+      response.resultId ?? response.result_id ?? response.logId ?? response.log_id,
+      ""
+    ),
+    title: toStringValue(response.title, "Task Result"),
+    content: toStringValue(response.content, ""),
+  };
+}
+
+export async function requestAgentResultDocument(resultId) {
+  const normalizedResultId = toStringValue(resultId, "");
+  if (!normalizedResultId) {
+    throw new Error("Missing result id for task result.");
+  }
+
+  const invoke = window?.__TAURI__?.core?.invoke;
+  if (typeof invoke === "function") {
+    const raw = await invoke("read_agent_result_document", {
+      resultId: normalizedResultId,
+      result_id: normalizedResultId,
+    });
+    return normalizeAgentResultDocumentResponse(raw);
+  }
+
+  const raw = await postJson(
+    "/api/agent/document",
+    { resultId: normalizedResultId, logId: normalizedResultId },
+    "Task result request failed with status"
+  );
+  return normalizeAgentResultDocumentResponse(raw);
+}
+
+export async function requestAgentRunDocument(logId) {
+  return requestAgentResultDocument(logId);
 }

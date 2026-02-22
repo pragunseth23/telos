@@ -49,6 +49,39 @@ test("normalizeModelTurnResponse tolerates non-string response fields", () => {
   assert.match(response.onboarding.profile.aboutYourself, /student/i);
 });
 
+test("normalizeModelTurnResponse normalizes workspace graph updates", () => {
+  const response = normalizeModelTurnResponse(
+    {
+      phase: "workspace",
+      reply: "Done",
+      graph_updates: [
+        {
+          operation: "add action",
+          title: ["Draft founder outreach script"],
+          parent_goal: "Become a founder",
+        },
+        {
+          op: "add_attached_task",
+          taskTitle: "Search top 20 Berkeley startup clubs",
+          parentAction: "Draft founder outreach script",
+        },
+        {
+          op: "unknown_op",
+          title: "Should be ignored",
+        },
+      ],
+    },
+    "workspace"
+  );
+
+  assert.equal(response.phase, "workspace");
+  assert.equal(Array.isArray(response.graphUpdates), true);
+  assert.equal(response.graphUpdates.length, 2);
+  assert.equal(response.graphUpdates[0].op, "add_speed1_action");
+  assert.equal(response.graphUpdates[0].parentGoal, "Become a Founder");
+  assert.equal(response.graphUpdates[1].op, "add_attached_task");
+});
+
 test("normalizeAgentRunRequest enforces required identity fields", () => {
   const payload = normalizeAgentRunRequest({
     taskId: "task_1",
@@ -72,8 +105,8 @@ test("normalizeAgentRunResponse tolerates snake_case and mixed types", () => {
     message: ["done"],
     task_confidence_delta: "0.08",
     parent_confidence_delta: "0.03",
-    log: {
-      id: "log_1",
+    result: {
+      id: "result_1",
       task_id: "task_1",
       action_summary: ["Completed", "summary"],
       outputs: ["A", 12, true],
@@ -87,7 +120,8 @@ test("normalizeAgentRunResponse tolerates snake_case and mixed types", () => {
   assert.equal(response.status, "completed");
   assert.equal(response.taskConfidenceDelta, 0.08);
   assert.equal(response.parentConfidenceDelta, 0.03);
-  assert.equal(response.log.taskId, "task_1");
-  assert.equal(typeof response.log.actionSummary, "string");
-  assert.equal(response.log.intentAlignmentReport.reward, 0.6);
+  assert.equal(response.result.taskId, "task_1");
+  assert.equal(typeof response.result.actionSummary, "string");
+  assert.equal(response.result.intentAlignmentReport.reward, 0.6);
+  assert.equal(response.log.id, "result_1");
 });

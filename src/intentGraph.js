@@ -1,4 +1,10 @@
 import { clamp, deepClone, nowIso, splitList, uid } from "./utils.js";
+import {
+  ensureSpeed1ActionTitle,
+  ensureSpeed2GoalTitle,
+  normalizeTitleForDisplay,
+  normalizeTitleKey,
+} from "./naming.js";
 
 export const NODE_TYPES = Object.freeze({
   ROOT: "root",
@@ -27,6 +33,26 @@ function inferExecutionMode(taskTitle) {
   }
 
   return EXECUTION_MODES.HYBRID;
+}
+
+function normalizeRootRoleLabel(rawRole) {
+  const cleaned = String(rawRole || "")
+    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/^[\s"'`]+|[\s"'`]+$/g, "")
+    .replace(/^[\-*+•]+/, "")
+    .replace(/^\d+[\).:-]?\s*/, "")
+    .replace(
+      /^(?:core\s*identity|identity|primary\s*identity|role|roles|lens|profile)\s*[:\-]\s*/i,
+      ""
+    )
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (!cleaned || /^(?:core\s*identity|identity)$/i.test(cleaned)) {
+    return "";
+  }
+
+  return normalizeTitleForDisplay(cleaned, "");
 }
 
 function defaultNode(input = {}) {
@@ -428,7 +454,17 @@ export class IntentGraphEngine {
   initializeFromOnboarding(profile) {
     this.reset();
 
-    const roles = splitList(profile.roles);
+    const roles = [];
+    splitList(profile.roles).forEach((entry) => {
+      const normalizedRole = normalizeRootRoleLabel(entry);
+      if (!normalizedRole) {
+        return;
+      }
+      if (roles.some((role) => normalizeTitleKey(role) === normalizeTitleKey(normalizedRole))) {
+        return;
+      }
+      roles.push(normalizedRole);
+    });
     const priorities = splitList(profile.currentPriorities);
     const ambitions = splitList(profile.longTermAmbitions);
     const constraints = splitList(profile.constraints);
@@ -436,10 +472,11 @@ export class IntentGraphEngine {
     const tensions = splitList(profile.tensions);
     const relationships = splitList(profile.relationships);
 
+    const rootTitle = roles.length ? roles.join(" / ") : "Identity";
     const rootNode = this.addNode(
       {
         type: NODE_TYPES.ROOT,
-        title: roles.length ? `Core Identity: ${roles.join(" / ")}` : "Core Identity",
+        title: rootTitle,
         description: profile.aboutYourself || "User profile root node",
         priorityWeight: 1,
         temporalHorizon: "lifelong",
@@ -459,8 +496,33 @@ export class IntentGraphEngine {
       { snapshot: false }
     );
 
-    const speed2Ambitions =
-      ambitions.length > 0 ? ambitions : ["Clarify long-term objective"];
+    const rawSpeed2Ambitions =
+      ambitions.length > 0
+        ? ambitions
+        : ["Define a long-term direction with measurable milestones"];
+    const speed2Ambitions = [];
+    rawSpeed2Ambitions.forEach((ambition) => {
+      const normalizedAmbition = ensureSpeed2GoalTitle(
+        ambition,
+        rootTitle,
+        speed2Ambitions.length + 1
+      );
+      if (!normalizedAmbition) {
+        return;
+      }
+      if (
+        speed2Ambitions.some(
+          (existingAmbition) => normalizeTitleKey(existingAmbition) === normalizeTitleKey(normalizedAmbition)
+        )
+      ) {
+        return;
+      }
+      speed2Ambitions.push(normalizedAmbition);
+    });
+    if (speed2Ambitions.length === 0) {
+      speed2Ambitions.push(ensureSpeed2GoalTitle("", rootTitle, 1));
+    }
+
     const speed2Nodes = speed2Ambitions.map((ambition, index) =>
       this.addNode(
         {
@@ -474,48 +536,77 @@ export class IntentGraphEngine {
           emotionalValence: 0.25,
           constraints,
         },
-        `Speed-2 goal created: ${ambition}`,
+        `Goal created: ${ambition}`,
         { snapshot: false }
       )
     );
 
-    const speed1Tasks = priorities.length ? priorities : ["Define first actionable step"];
+    const speed1Tasks =
+      priorities.length > 0
+        ? priorities
+        : ["Draft a 2-week execution plan for your highest-priority goal"];
+    const speed1KeysByParent = new Map();
     speed1Tasks.forEach((task, index) => {
       const parent = speed2Nodes[index % speed2Nodes.length];
+      const parentKey = String(parent.id || "");
+      if (!speed1KeysByParent.has(parentKey)) {
+        speed1KeysByParent.set(parentKey, new Set());
+      }
+      const keyBucket = speed1KeysByParent.get(parentKey);
+
+      let normalizedTaskTitle = ensureSpeed1ActionTitle(task, parent.title, keyBucket.size + 1);
+      let attempt = 0;
+      while (attempt < 4 && keyBucket.has(normalizeTitleKey(normalizedTaskTitle))) {
+        attempt += 1;
+        normalizedTaskTitle = ensureSpeed1ActionTitle(
+          "",
+          parent.title,
+          keyBucket.size + 1 + attempt
+        );
+      }
+      keyBucket.add(normalizeTitleKey(normalizedTaskTitle));
+
       this.addNode(
         {
           type: NODE_TYPES.SPEED1,
           parentId: parent.id,
-          title: task,
+          title: normalizedTaskTitle,
           description: `Actionable child of "${parent.title}"`,
           priorityWeight: clamp(parent.priorityWeight - 0.12, 0.2, 1),
           temporalHorizon: "short",
           confidenceScore: 0.6,
           emotionalValence: 0.1,
           constraints,
-          executionMode: inferExecutionMode(task),
+          executionMode: inferExecutionMode(normalizedTaskTitle),
         },
-        `Speed-1 task created: ${task}`,
+        `Action created: ${normalizedTaskTitle}`,
         { snapshot: false }
       );
     });
 
-    for (const speed2Node of speed2Nodes) {
-      const starterTask = `Research and organize resources for ${speed2Node.title}`;
+    for (let index = 0; index < speed2Nodes.length; index += 1) {
+      const speed2Node = speed2Nodes[index];
+      const hasChildAction = this.getChildren(speed2Node.id).some(
+        (node) => node.type === NODE_TYPES.SPEED1
+      );
+      if (hasChildAction) {
+        continue;
+      }
+      const starterTask = ensureSpeed1ActionTitle("", speed2Node.title, index + 1);
       this.addNode(
         {
           type: NODE_TYPES.SPEED1,
           parentId: speed2Node.id,
           title: starterTask,
-          description: "Agent-friendly starter task generated during onboarding",
+          description: "Specific starter action generated during onboarding",
           priorityWeight: clamp(speed2Node.priorityWeight - 0.18, 0.2, 1),
           temporalHorizon: "short",
           confidenceScore: 0.58,
           emotionalValence: 0.08,
           constraints,
-          executionMode: EXECUTION_MODES.AGENT,
+          executionMode: inferExecutionMode(starterTask),
         },
-        `Starter Speed-1 task created for ${speed2Node.title}`,
+        `Starter Action created for ${speed2Node.title}`,
         { snapshot: false }
       );
     }

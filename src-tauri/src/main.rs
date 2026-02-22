@@ -21,6 +21,99 @@ const IRREVERSIBLE_KEYWORDS: [&str; 10] = [
   "enroll",
   "transfer",
 ];
+const AGENT_EXECUTABLE_ALLOW_TERMS: [&str; 19] = [
+  "search",
+  "find",
+  "research",
+  "compare",
+  "summarize",
+  "organize",
+  "collect",
+  "gather",
+  "compile",
+  "draft",
+  "outline",
+  "brainstorm",
+  "analyze",
+  "analyse",
+  "online",
+  "study material",
+  "study materials",
+  "resource",
+  "resources",
+];
+const AGENT_EXECUTABLE_ACTION_TERMS: [&str; 16] = [
+  "search",
+  "find",
+  "research",
+  "compare",
+  "summarize",
+  "organize",
+  "collect",
+  "gather",
+  "compile",
+  "draft",
+  "outline",
+  "brainstorm",
+  "analyze",
+  "analyse",
+  "rank",
+  "prioritize",
+];
+const AGENT_EXECUTABLE_SCOPE_TERMS: [&str; 12] = [
+  "for",
+  "about",
+  "on",
+  "from",
+  "between",
+  "within",
+  "across",
+  "near",
+  "local",
+  "top",
+  "best",
+  "vs",
+];
+const AGENT_EXECUTABLE_OUTPUT_TERMS: [&str; 16] = [
+  "list",
+  "shortlist",
+  "table",
+  "comparison",
+  "summary",
+  "brief",
+  "report",
+  "checklist",
+  "links",
+  "sources",
+  "resource",
+  "resources",
+  "study material",
+  "study materials",
+  "plan",
+  "outline",
+];
+const AGENT_EXECUTABLE_BLOCK_TERMS: [&str; 20] = [
+  "practice",
+  "play",
+  "workout",
+  "exercise",
+  "train",
+  "attend",
+  "go to",
+  "show up",
+  "call",
+  "meet",
+  "talk to",
+  "interview",
+  "cook",
+  "travel",
+  "study",
+  "build",
+  "code",
+  "develop",
+  "ship",
+  "launch",
+];
 
 #[derive(Clone)]
 struct AppState {
@@ -236,6 +329,17 @@ struct OnboardingModelOutput {
 struct WorkspaceModelOutput {
   reply: Option<String>,
   memory_note: Option<String>,
+  graph_updates: Vec<WorkspaceGraphUpdate>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceGraphUpdate {
+  op: String,
+  title: String,
+  parent_goal: Option<String>,
+  parent_action: Option<String>,
+  description: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -245,6 +349,7 @@ struct ChatResponse {
   reply: String,
   onboarding_complete: Option<bool>,
   onboarding: Option<OnboardingClientState>,
+  graph_updates: Option<Vec<WorkspaceGraphUpdate>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -337,6 +442,18 @@ struct AgentExecutionLog {
   estimated_hours: f64,
   estimated_cost: f64,
   intent_alignment_report: AgentIntentAlignmentReport,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  artifact_path: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  deliverable_paths: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentRunDocumentResponse {
+  result_id: String,
+  title: String,
+  content: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -345,7 +462,7 @@ struct AgentResponse {
   status: String,
   message: String,
   approval_context: Option<AgentApprovalContext>,
-  log: Option<AgentExecutionLog>,
+  result: Option<AgentExecutionLog>,
   task_confidence_delta: Option<f64>,
   parent_confidence_delta: Option<f64>,
 }
@@ -396,10 +513,63 @@ async fn run_agent_task(
   }
 
   let mut context = load_context(&app)?;
-  let response = run_agent_execution_turn(&state, &mut context, &payload).await?;
+  let mut response = run_agent_execution_turn(&state, &mut context, &payload).await?;
+
+  if response.status == "completed" {
+    if let Some(result_payload) = response.result.as_mut() {
+      match persist_agent_run_artifact(&app, &payload, result_payload) {
+        Ok(artifacts) => {
+          result_payload.artifact_path = Some(artifacts.deliverables_folder_path);
+          result_payload.deliverable_paths = Some(artifacts.deliverable_file_paths);
+        }
+        Err(err) => {
+          response.message = format!("Agent action executed, but artifact save failed: {err}");
+        }
+      }
+    }
+  }
+
   context.updated_at = now_iso();
   save_context(&app, &context)?;
   Ok(response)
+}
+
+#[tauri::command]
+fn read_agent_run_document(
+  app: AppHandle,
+  log_id: String,
+) -> Result<AgentRunDocumentResponse, String> {
+  let normalized_log_id = normalize_log_id(&log_id)?;
+  let file_path = resolve_agent_run_document_path(&app, &normalized_log_id)?;
+  let content = fs::read_to_string(&file_path)
+    .map_err(|e| format!("Failed to read task result document: {e}"))?;
+
+  let title = content
+    .lines()
+    .find_map(|line| {
+      let trimmed = line.trim();
+      if trimmed.starts_with("# ") {
+        Some(trimmed.trim_start_matches("# ").trim().to_string())
+      } else {
+        None
+      }
+    })
+    .filter(|value| !value.is_empty())
+    .unwrap_or_else(|| "Task Result".to_string());
+
+  Ok(AgentRunDocumentResponse {
+    result_id: normalized_log_id,
+    title,
+    content,
+  })
+}
+
+#[tauri::command]
+fn read_agent_result_document(
+  app: AppHandle,
+  result_id: String,
+) -> Result<AgentRunDocumentResponse, String> {
+  read_agent_run_document(app, result_id)
 }
 
 async fn run_onboarding_turn(
@@ -458,6 +628,7 @@ async fn run_onboarding_turn(
         name: context.onboarding.name.clone(),
         profile: context.onboarding.profile.clone(),
       }),
+      graph_updates: None,
     });
   }
 
@@ -554,6 +725,7 @@ async fn run_onboarding_turn(
       name: context.onboarding.name.clone(),
       profile: context.onboarding.profile.clone(),
     }),
+    graph_updates: None,
   })
 }
 
@@ -579,7 +751,15 @@ async fn run_workspace_turn(
     "You are Telos, a goal-aware personal AI assistant.",
     "Ground responses in long-horizon goals, constraints, and relationships.",
     "Be concise, practical, and action-oriented.",
-    "Return strict JSON only with keys: reply, memory_note.",
+    "Return strict JSON only with keys: reply, memory_note, graph_updates.",
+    "graph_updates must be an array of objects using this schema: { op, title, parent_goal, parent_action, description }.",
+    "Allowed op values: add_speed2_goal, add_speed1_action, add_attached_task.",
+    "Use clean capitalization for titles.",
+    "Goals must be distinct from identity labels (never copy the identity string).",
+    "Actions must be concrete execution steps and must not copy the parent Goal text.",
+    "Attached tasks must be specific and actionable with explicit scope/output (for example a list/table/brief and count).",
+    "Use graph_updates when the user asks to add/create/include more goals, actions, or attached tasks.",
+    "If no graph mutation is requested, return graph_updates as an empty array.",
     "No markdown.",
   ]
   .join(" ");
@@ -595,6 +775,12 @@ async fn run_workspace_turn(
   let model_json =
     call_openai_json(state, &system_prompt, history, user_payload, ReasoningEffort::None).await?;
   let output = parse_workspace_model_output(&model_json);
+  let graph_updates = output
+    .graph_updates
+    .into_iter()
+    .filter(|entry| !entry.title.trim().is_empty())
+    .take(8)
+    .collect::<Vec<WorkspaceGraphUpdate>>();
 
   let reply = output
     .reply
@@ -614,13 +800,24 @@ async fn run_workspace_turn(
     }
   }
 
-  append_turn(context, "workspace", "assistant", &reply, json!({}));
+  append_turn(
+    context,
+    "workspace",
+    "assistant",
+    &reply,
+    json!({ "graphUpdates": graph_updates }),
+  );
 
   Ok(ChatResponse {
     phase: "workspace".to_string(),
     reply,
     onboarding_complete: None,
     onboarding: None,
+    graph_updates: if graph_updates.is_empty() {
+      None
+    } else {
+      Some(graph_updates)
+    },
   })
 }
 
@@ -634,7 +831,7 @@ async fn run_agent_execution_turn(
       status: "error".to_string(),
       message: "Task payload mismatch.".to_string(),
       approval_context: None,
-      log: None,
+      result: None,
       task_confidence_delta: None,
       parent_confidence_delta: None,
     });
@@ -644,11 +841,11 @@ async fn run_agent_execution_turn(
     return Ok(AgentResponse {
       status: "error".to_string(),
       message: format!(
-        "Only Speed-1 tasks are executable. Node type is {}.",
+        "Only Actions are executable. Node type is {}.",
         payload.task.r#type
       ),
       approval_context: None,
-      log: None,
+      result: None,
       task_confidence_delta: None,
       parent_confidence_delta: None,
     });
@@ -659,13 +856,25 @@ async fn run_agent_execution_turn(
       status: "blocked".to_string(),
       message: "Task is labeled Human-executable and cannot be fully automated.".to_string(),
       approval_context: None,
-      log: None,
+      result: None,
       task_confidence_delta: None,
       parent_confidence_delta: None,
     });
   }
 
   let requested_action = payload.requested_action.as_deref().unwrap_or("");
+
+  if let Some(reason) = agent_execution_block_reason(&payload.task, requested_action) {
+    return Ok(AgentResponse {
+      status: "blocked".to_string(),
+      message: reason,
+      approval_context: None,
+      result: None,
+      task_confidence_delta: None,
+      parent_confidence_delta: None,
+    });
+  }
+
   let needs_approval =
     detect_irreversible_action(&payload.task.title, &payload.task.description, requested_action);
   let approval_token = payload.approval_token.unwrap_or(false);
@@ -683,17 +892,22 @@ async fn run_agent_execution_turn(
           requested_action,
         ),
       }),
-      log: None,
+      result: None,
       task_confidence_delta: None,
       parent_confidence_delta: None,
     });
   }
 
+  let run_subject = if requested_action.trim().is_empty() {
+    payload.task.title.clone()
+  } else {
+    requested_action.to_string()
+  };
   append_turn(
     context,
     "agent",
     "user",
-    &format!("Run task: {}", payload.task.title),
+    &format!("Run task: {run_subject}"),
     json!({
       "taskId": payload.task_id,
       "executionMode": payload.task.execution_mode,
@@ -702,7 +916,7 @@ async fn run_agent_execution_turn(
   );
 
   let system_prompt = [
-    "You are the Telos execution agent for Speed-1 tasks.",
+    "You are the Telos execution agent for Actions.",
     "Given task + profile context, produce realistic execution output.",
     "Do not mention being unable to execute; provide a practical completion summary.",
     "Return strict JSON only with keys: action_summary, outputs, justification, estimated_hours, estimated_cost.",
@@ -723,7 +937,7 @@ async fn run_agent_execution_turn(
     "parentTask": payload.parent_task.clone(),
     "profile": payload.profile.clone().unwrap_or_default(),
     "requestedAction": requested_action,
-    "instruction": "Return one execution log that can be stored."
+    "instruction": "Return one task result that can be stored."
   });
 
   let reasoning_effort = if approval_token {
@@ -767,11 +981,11 @@ async fn run_agent_execution_turn(
     .unwrap_or_else(|| {
       if let Some(parent) = payload.parent_task.as_ref() {
         format!(
-          "Execution advanced the Speed-1 task while supporting the parent goal \"{}\".",
+          "Execution advanced the Action while supporting the parent Goal \"{}\".",
           parent.title
         )
       } else {
-        "Execution advanced the Speed-1 task and reduced ambiguity.".to_string()
+        "Execution advanced the Action and reduced ambiguity.".to_string()
       }
     });
 
@@ -826,8 +1040,8 @@ async fn run_agent_execution_turn(
   let breach_penalty = pressure.breached.len() as f64 * 0.8;
   let reward = round3(progress_score - tension_penalty - approach_penalty - breach_penalty);
 
-  let log = AgentExecutionLog {
-    id: generate_id("log"),
+  let result_payload = AgentExecutionLog {
+    id: generate_id("result"),
     task_id: payload.task_id.clone(),
     created_at: now_iso(),
     status: "completed".to_string(),
@@ -844,6 +1058,8 @@ async fn run_agent_execution_turn(
       constraint_breaches: pressure.breached,
       reward,
     },
+    artifact_path: None,
+    deliverable_paths: None,
   };
 
   append_turn(
@@ -863,7 +1079,7 @@ async fn run_agent_execution_turn(
     status: "completed".to_string(),
     message: "Agent action executed successfully.".to_string(),
     approval_context: None,
-    log: Some(log),
+    result: Some(result_payload),
     task_confidence_delta: Some(0.08),
     parent_confidence_delta: Some(0.03),
   })
@@ -905,7 +1121,6 @@ async fn call_openai_json(
 
   let request_body = json!({
     "model": state.model,
-    "temperature": 0.35,
     "reasoning": { "effort": reasoning_effort.as_str() },
     "text": { "format": { "type": "json_object" } },
     "input": input
@@ -999,6 +1214,9 @@ fn parse_workspace_model_output(model_json: &Value) -> WorkspaceModelOutput {
   WorkspaceModelOutput {
     reply: value_by_keys(obj, &["reply"]).and_then(normalize_string_value),
     memory_note: value_by_keys(obj, &["memory_note", "memoryNote"]).and_then(normalize_string_value),
+    graph_updates: value_by_keys(obj, &["graph_updates", "graphUpdates", "updates"])
+      .and_then(parse_workspace_graph_updates)
+      .unwrap_or_default(),
   }
 }
 
@@ -1018,6 +1236,85 @@ fn parse_agent_model_output(model_json: &Value) -> AgentModelOutput {
       .and_then(normalize_f64_value),
     estimated_cost: value_by_keys(obj, &["estimated_cost", "estimatedCost"])
       .and_then(normalize_f64_value),
+  }
+}
+
+fn normalize_workspace_graph_op(raw: &str) -> Option<String> {
+  let normalized = raw
+    .trim()
+    .to_lowercase()
+    .replace('-', "_")
+    .replace(' ', "_");
+
+  match normalized.as_str() {
+    "add_speed2_goal" | "add_goal" | "add_long_goal" | "add_long_horizon_goal" | "new_goal" => {
+      Some("add_speed2_goal".to_string())
+    }
+    "add_speed1_action"
+    | "add_action"
+    | "add_task_action"
+    | "add_speed1"
+    | "new_action" => Some("add_speed1_action".to_string()),
+    "add_attached_task"
+    | "add_checklist_item"
+    | "add_checklist_task"
+    | "add_task"
+    | "new_task" => Some("add_attached_task".to_string()),
+    _ => None,
+  }
+}
+
+fn parse_workspace_graph_update(value: &Value) -> Option<WorkspaceGraphUpdate> {
+  let obj = value.as_object()?;
+  let op_raw = value_by_keys(obj, &["op", "operation", "type", "kind"])
+    .and_then(normalize_string_value)?;
+  let op = normalize_workspace_graph_op(&op_raw)?;
+  let title = value_by_keys(
+    obj,
+    &["title", "node_title", "nodeTitle", "actionTitle", "taskTitle", "text"],
+  )
+  .and_then(normalize_string_value)?;
+  let trimmed_title = title.trim().to_string();
+  if trimmed_title.is_empty() {
+    return None;
+  }
+
+  Some(WorkspaceGraphUpdate {
+    op,
+    title: trimmed_title,
+    parent_goal: value_by_keys(obj, &["parent_goal", "parentGoal", "goal", "goalTitle"])
+      .and_then(normalize_string_value),
+    parent_action: value_by_keys(
+      obj,
+      &["parent_action", "parentAction", "action", "actionTitle", "task", "taskTitle"],
+    )
+    .and_then(normalize_string_value),
+    description: value_by_keys(obj, &["description", "details", "note", "reason"])
+      .and_then(normalize_string_value),
+  })
+}
+
+fn parse_workspace_graph_updates(value: &Value) -> Option<Vec<WorkspaceGraphUpdate>> {
+  let mut updates = vec![];
+  match value {
+    Value::Array(items) => {
+      for item in items {
+        if let Some(parsed) = parse_workspace_graph_update(item) {
+          updates.push(parsed);
+        }
+      }
+    }
+    _ => {
+      if let Some(parsed) = parse_workspace_graph_update(value) {
+        updates.push(parsed);
+      }
+    }
+  }
+
+  if updates.is_empty() {
+    None
+  } else {
+    Some(updates.into_iter().take(8).collect())
   }
 }
 
@@ -1300,13 +1597,144 @@ fn sanitize_onboarding_reply(
   cleaned.to_string()
 }
 
-fn detect_irreversible_action(task_title: &str, task_description: &str, requested_action: &str) -> bool {
-  let combined = format!(
-    "{} {} {}",
-    task_title.to_lowercase(),
-    task_description.to_lowercase(),
+fn is_word_char(ch: char) -> bool {
+  ch.is_ascii_alphanumeric() || ch == '_'
+}
+
+fn contains_term_with_boundaries(text: &str, term: &str) -> bool {
+  let needle = term.trim();
+  if needle.is_empty() {
+    return false;
+  }
+
+  let mut offset = 0usize;
+  while let Some(relative_idx) = text[offset..].find(needle) {
+    let idx = offset + relative_idx;
+    let end_idx = idx + needle.len();
+
+    let starts_word = needle
+      .chars()
+      .next()
+      .map(is_word_char)
+      .unwrap_or(false);
+    let ends_word = needle
+      .chars()
+      .last()
+      .map(is_word_char)
+      .unwrap_or(false);
+
+    let before = if idx == 0 {
+      None
+    } else {
+      text[..idx].chars().next_back()
+    };
+    let after = if end_idx >= text.len() {
+      None
+    } else {
+      text[end_idx..].chars().next()
+    };
+
+    let before_ok = !starts_word || before.map(|ch| !is_word_char(ch)).unwrap_or(true);
+    let after_ok = !ends_word || after.map(|ch| !is_word_char(ch)).unwrap_or(true);
+    if before_ok && after_ok {
+      return true;
+    }
+
+    offset = end_idx;
+    if offset >= text.len() {
+      break;
+    }
+  }
+
+  false
+}
+
+fn agent_execution_block_reason(task: &AgentNodeInput, requested_action: &str) -> Option<String> {
+  let mode = task.execution_mode.trim();
+  if mode != "Agent" && mode != "Hybrid" {
+    return Some("Only Agent or Hybrid execution modes can run agent actions.".to_string());
+  }
+
+  let normalized_text = if requested_action.trim().is_empty() {
+    format!(
+      "{} {}",
+      task.title.to_lowercase(),
+      task.description.to_lowercase()
+    )
+  } else {
     requested_action.to_lowercase()
-  );
+  };
+
+  let has_allow_signal = AGENT_EXECUTABLE_ALLOW_TERMS
+    .iter()
+    .any(|term| contains_term_with_boundaries(&normalized_text, term));
+  if !has_allow_signal {
+    return Some(
+      "Agent runs are reserved for specific online research and synthesis tasks.".to_string(),
+    );
+  }
+
+  let has_study_materials = contains_term_with_boundaries(&normalized_text, "study material")
+    || contains_term_with_boundaries(&normalized_text, "study materials");
+  let has_block_signal = AGENT_EXECUTABLE_BLOCK_TERMS.iter().any(|term| {
+    if *term == "study" && has_study_materials {
+      return false;
+    }
+    contains_term_with_boundaries(&normalized_text, term)
+  });
+  if has_block_signal {
+    return Some("This task appears to require human or real-world execution steps.".to_string());
+  }
+
+  if !has_strict_agent_specificity(&normalized_text) {
+    return Some(
+      "Agent tasks must be specific and actionable: include a concrete action, clear scope, and expected output."
+        .to_string(),
+    );
+  }
+
+  None
+}
+
+fn has_strict_agent_specificity(normalized_text: &str) -> bool {
+  let word_count = normalized_text
+    .split_whitespace()
+    .filter(|token| !token.trim().is_empty())
+    .count();
+  if word_count < 6 {
+    return false;
+  }
+
+  let has_action_signal = AGENT_EXECUTABLE_ACTION_TERMS
+    .iter()
+    .any(|term| contains_term_with_boundaries(normalized_text, term));
+  if !has_action_signal {
+    return false;
+  }
+
+  let has_scope_signal = AGENT_EXECUTABLE_SCOPE_TERMS
+    .iter()
+    .any(|term| contains_term_with_boundaries(normalized_text, term));
+  let has_output_signal = AGENT_EXECUTABLE_OUTPUT_TERMS
+    .iter()
+    .any(|term| contains_term_with_boundaries(normalized_text, term));
+  let has_numeric_scope = normalized_text
+    .split_whitespace()
+    .any(|token| token.chars().any(|ch| ch.is_ascii_digit()));
+
+  has_scope_signal || has_output_signal || has_numeric_scope
+}
+
+fn detect_irreversible_action(task_title: &str, task_description: &str, requested_action: &str) -> bool {
+  let combined = if requested_action.trim().is_empty() {
+    format!(
+      "{} {}",
+      task_title.to_lowercase(),
+      task_description.to_lowercase()
+    )
+  } else {
+    requested_action.to_lowercase()
+  };
   IRREVERSIBLE_KEYWORDS
     .iter()
     .any(|keyword| combined.contains(keyword))
@@ -1317,12 +1745,15 @@ fn triggered_irreversible_keywords(
   task_description: &str,
   requested_action: &str,
 ) -> Vec<String> {
-  let combined = format!(
-    "{} {} {}",
-    task_title.to_lowercase(),
-    task_description.to_lowercase(),
+  let combined = if requested_action.trim().is_empty() {
+    format!(
+      "{} {}",
+      task_title.to_lowercase(),
+      task_description.to_lowercase()
+    )
+  } else {
     requested_action.to_lowercase()
-  );
+  };
   IRREVERSIBLE_KEYWORDS
     .iter()
     .filter(|keyword| combined.contains(**keyword))
@@ -1492,6 +1923,315 @@ fn context_path(app: &AppHandle) -> Result<PathBuf, String> {
   Ok(context_dir.join("context.json"))
 }
 
+fn agent_runs_dir(app: &AppHandle) -> Result<PathBuf, String> {
+  let context_file = context_path(app)?;
+  let context_dir = context_file
+    .parent()
+    .ok_or_else(|| "Failed to resolve context directory.".to_string())?;
+  let runs_dir = context_dir.join("agent_runs");
+  fs::create_dir_all(&runs_dir)
+    .map_err(|e| format!("Failed to create agent runs directory: {e}"))?;
+  Ok(runs_dir)
+}
+
+fn sanitize_filename_component(raw: &str, fallback: &str) -> String {
+  let normalized = raw
+    .to_lowercase()
+    .chars()
+    .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
+    .collect::<String>()
+    .split('-')
+    .filter(|chunk| !chunk.is_empty())
+    .collect::<Vec<&str>>()
+    .join("-");
+  if normalized.is_empty() {
+    fallback.to_string()
+  } else {
+    normalized.chars().take(48).collect::<String>()
+  }
+}
+
+fn normalize_log_id(raw: &str) -> Result<String, String> {
+  let trimmed = raw.trim();
+  if trimmed.is_empty() {
+    return Err("Log id is required.".to_string());
+  }
+  let is_safe = trimmed
+    .chars()
+    .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-');
+  if !is_safe {
+    return Err("Invalid result id format.".to_string());
+  }
+  Ok(trimmed.to_string())
+}
+
+fn resolve_agent_run_document_path(app: &AppHandle, log_id: &str) -> Result<PathBuf, String> {
+  let runs_dir = agent_runs_dir(app)?;
+  let prefix = format!("{log_id}__");
+  let entries = fs::read_dir(&runs_dir)
+    .map_err(|e| format!("Failed to list task result documents: {e}"))?;
+
+  let mut candidate_paths = entries
+    .filter_map(|entry| entry.ok())
+    .map(|entry| entry.path())
+    .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("md"))
+    .filter(|path| {
+      path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .map(|name| name.starts_with(&prefix))
+        .unwrap_or(false)
+    })
+    .collect::<Vec<PathBuf>>();
+
+  candidate_paths.sort();
+  candidate_paths
+    .pop()
+    .ok_or_else(|| "Task result document not found.".to_string())
+}
+
+fn normalize_inline_text(raw: &str, fallback: &str) -> String {
+  let normalized = raw.split_whitespace().collect::<Vec<&str>>().join(" ");
+  if normalized.is_empty() {
+    fallback.to_string()
+  } else {
+    normalized
+  }
+}
+
+#[derive(Debug, Clone)]
+struct PersistedAgentArtifacts {
+  deliverables_folder_path: String,
+  deliverable_file_paths: Vec<String>,
+}
+
+fn desktop_deliverables_root(app: &AppHandle) -> Result<PathBuf, String> {
+  let desktop_dir = match app.path().desktop_dir() {
+    Ok(path) => path,
+    Err(_) => {
+      let home_dir = app
+        .path()
+        .home_dir()
+        .map_err(|e| format!("Failed to resolve home directory: {e}"))?;
+      home_dir.join("Desktop")
+    }
+  };
+
+  let root = desktop_dir.join("Telos Deliverables");
+  fs::create_dir_all(&root)
+    .map_err(|e| format!("Failed to create desktop deliverables directory: {e}"))?;
+  Ok(root)
+}
+
+fn ensure_deliverable_outputs(outputs: &[String]) -> Vec<String> {
+  let normalized = outputs
+    .iter()
+    .map(|entry| normalize_inline_text(entry, "Deliverable"))
+    .filter(|entry| !entry.is_empty())
+    .collect::<Vec<String>>();
+  if normalized.is_empty() {
+    vec!["Primary deliverable completed".to_string()]
+  } else {
+    normalized
+  }
+}
+
+fn build_deliverable_document(
+  payload: &AgentPayload,
+  result_payload: &AgentExecutionLog,
+  deliverable_title: &str,
+  index: usize,
+  total: usize,
+) -> String {
+  let mut lines = Vec::<String>::new();
+  lines.push(format!("# {}", normalize_inline_text(deliverable_title, "Deliverable")));
+  lines.push(String::new());
+  lines.push(format!("- Run ID: {}", result_payload.id));
+  lines.push(format!("- Deliverable: {} of {}", index, total));
+  lines.push(format!(
+    "- Task: {}",
+    normalize_inline_text(&payload.task.title, "Task")
+  ));
+  if let Some(parent) = payload.parent_task.as_ref() {
+    lines.push(format!(
+      "- Goal: {}",
+      normalize_inline_text(&parent.title, "Goal")
+    ));
+  }
+  lines.push(String::new());
+
+  lines.push("## Deliverable Content".to_string());
+  lines.push(normalize_inline_text(
+    &result_payload.action_summary,
+    "Execution completed.",
+  ));
+  lines.push(String::new());
+
+  lines.push("## Deliverable Details".to_string());
+  lines.push(format!(
+    "This file captures the concrete output for: {}",
+    normalize_inline_text(deliverable_title, "Deliverable")
+  ));
+  lines.push(normalize_inline_text(
+    &result_payload.justification,
+    "This deliverable supports your current goal and immediate execution.",
+  ));
+  lines.push(String::new());
+
+  lines.push("## Next Step".to_string());
+  lines.push(
+    "Review this file, make any edits, and convert follow-up work into your next attached task."
+      .to_string(),
+  );
+  lines.push(String::new());
+
+  lines.join("\n")
+}
+
+fn persist_desktop_deliverables(
+  app: &AppHandle,
+  payload: &AgentPayload,
+  result_payload: &AgentExecutionLog,
+) -> Result<(PathBuf, Vec<String>), String> {
+  let root_dir = desktop_deliverables_root(app)?;
+  let task_slug = sanitize_filename_component(&payload.task.title, "task");
+  let run_folder_name = format!("{}__{}", result_payload.id, task_slug);
+  let run_folder = root_dir.join(run_folder_name);
+  fs::create_dir_all(&run_folder)
+    .map_err(|e| format!("Failed to create deliverable run directory: {e}"))?;
+
+  let deliverables = ensure_deliverable_outputs(&result_payload.outputs);
+  let total = deliverables.len();
+  let mut written_paths = Vec::<String>::with_capacity(total);
+
+  for (index, title) in deliverables.iter().enumerate() {
+    let fallback_name = format!("deliverable-{:02}", index + 1);
+    let deliverable_slug = sanitize_filename_component(title, &fallback_name);
+    let file_name = format!("{:02}__{}.md", index + 1, deliverable_slug);
+    let file_path = run_folder.join(file_name);
+    let content = build_deliverable_document(payload, result_payload, title, index + 1, total);
+    fs::write(&file_path, content)
+      .map_err(|e| format!("Failed to write deliverable file: {e}"))?;
+    written_paths.push(file_path.to_string_lossy().to_string());
+  }
+
+  Ok((run_folder, written_paths))
+}
+
+fn build_agent_run_document(
+  payload: &AgentPayload,
+  result_payload: &AgentExecutionLog,
+  deliverables_folder_path: &str,
+  deliverable_paths: &[String],
+) -> String {
+  let display_task_title = if let Some(requested_action) = payload.requested_action.as_ref() {
+    let normalized_action = normalize_inline_text(requested_action, "");
+    if !normalized_action.is_empty() {
+      normalized_action
+    } else {
+      normalize_inline_text(&payload.task.title, "Task")
+    }
+  } else {
+    normalize_inline_text(&payload.task.title, "Task")
+  };
+
+  let mut lines = Vec::<String>::new();
+  lines.push(format!("# Task Result: {}", display_task_title));
+  lines.push(String::new());
+
+  lines.push("## Outcome".to_string());
+  lines.push(normalize_inline_text(
+    &result_payload.action_summary,
+    "Execution completed.",
+  ));
+  lines.push(String::new());
+
+  lines.push("## Deliverables".to_string());
+  for output in ensure_deliverable_outputs(&result_payload.outputs) {
+    lines.push(format!("- {}", output));
+  }
+  lines.push(String::new());
+
+  lines.push("## Saved Deliverable Files".to_string());
+  lines.push(format!(
+    "- Desktop folder: {}",
+    normalize_inline_text(deliverables_folder_path, "Desktop/Telos Deliverables")
+  ));
+  if deliverable_paths.is_empty() {
+    lines.push("- No deliverable files were written.".to_string());
+  } else {
+    for path in deliverable_paths {
+      lines.push(format!("- {}", normalize_inline_text(path, "Deliverable file")));
+    }
+  }
+  lines.push(String::new());
+
+  lines.push("## Why This Matters".to_string());
+  lines.push(normalize_inline_text(
+    &result_payload.justification,
+    "This run moved the task forward with actionable output.",
+  ));
+  lines.push(String::new());
+
+  lines.push("## Context".to_string());
+  lines.push(format!(
+    "- Task: {}",
+    normalize_inline_text(&payload.task.title, "Task")
+  ));
+  if let Some(parent) = payload.parent_task.as_ref() {
+    lines.push(format!(
+      "- Parent goal: {}",
+      normalize_inline_text(&parent.title, "Parent goal")
+    ));
+  }
+  lines.push(String::new());
+  lines.push("## Suggested Next Step".to_string());
+  lines.push(
+    "Review this result, choose one deliverable to execute immediately, and convert it into the next attached task."
+      .to_string(),
+  );
+  lines.push(String::new());
+
+  lines.join("\n")
+}
+
+fn persist_agent_run_artifact(
+  app: &AppHandle,
+  payload: &AgentPayload,
+  result_payload: &AgentExecutionLog,
+) -> Result<PersistedAgentArtifacts, String> {
+  let (deliverables_folder, deliverable_file_paths) =
+    persist_desktop_deliverables(app, payload, result_payload)?;
+  let deliverables_folder_path = deliverables_folder.to_string_lossy().to_string();
+
+  let runs_dir = agent_runs_dir(app)?;
+  let task_slug = sanitize_filename_component(&payload.task.title, "task");
+  let file_name = format!("{}__{}.md", result_payload.id, task_slug);
+  let file_path = runs_dir.join(file_name);
+  let document = build_agent_run_document(
+    payload,
+    result_payload,
+    &deliverables_folder_path,
+    &deliverable_file_paths,
+  );
+  fs::write(&file_path, document)
+    .map_err(|e| format!("Failed to write task result document: {e}"))?;
+
+  let desktop_result_path = deliverables_folder.join("task-result.md");
+  fs::write(&desktop_result_path, build_agent_run_document(
+    payload,
+    result_payload,
+    &deliverables_folder_path,
+    &deliverable_file_paths,
+  ))
+  .map_err(|e| format!("Failed to write desktop task result document: {e}"))?;
+
+  Ok(PersistedAgentArtifacts {
+    deliverables_folder_path,
+    deliverable_file_paths,
+  })
+}
+
 fn load_context(app: &AppHandle) -> Result<PersistedContext, String> {
   let file_path = context_path(app)?;
   if !file_path.exists() {
@@ -1553,6 +2293,40 @@ mod tests {
   }
 
   #[test]
+  fn workspace_parser_extracts_graph_updates() {
+    let raw = json!({
+      "reply": "Added updates.",
+      "memory_note": "User wants faster execution.",
+      "graph_updates": [
+        {
+          "operation": "add action",
+          "title": ["Validate first 10 users"],
+          "parent_goal": "Become a founder"
+        },
+        {
+          "op": "add_task",
+          "taskTitle": "Search 20 local courts for pilot testing",
+          "parentAction": "Validate first 10 users"
+        },
+        {
+          "op": "unsupported_op",
+          "title": "Ignore me"
+        }
+      ]
+    });
+
+    let parsed = parse_workspace_model_output(&raw);
+    assert_eq!(parsed.reply.as_deref(), Some("Added updates."));
+    assert_eq!(parsed.graph_updates.len(), 2);
+    assert_eq!(parsed.graph_updates[0].op, "add_speed1_action");
+    assert_eq!(
+      parsed.graph_updates[0].parent_goal.as_deref(),
+      Some("Become a founder")
+    );
+    assert_eq!(parsed.graph_updates[1].op, "add_attached_task");
+  }
+
+  #[test]
   fn output_text_extractor_handles_object_content() {
     let raw = json!({
       "output": [{
@@ -1608,6 +2382,66 @@ mod tests {
     assert!(!looks_like_name_prompt(&sanitized));
     assert!(sanitized.to_lowercase().contains("risk tolerance"));
   }
+
+  #[test]
+  fn agent_policy_blocks_generic_research_task() {
+    let task = AgentNodeInput {
+      id: "node_speed1".to_string(),
+      r#type: "speed1".to_string(),
+      title: "Research pickleball".to_string(),
+      description: "".to_string(),
+      status: "todo".to_string(),
+      execution_mode: "Agent".to_string(),
+      priority_weight: Some(0.5),
+      confidence_score: Some(0.5),
+      conflicts: None,
+    };
+    let reason = agent_execution_block_reason(&task, "");
+    assert!(reason.is_some());
+    assert!(
+      reason
+        .unwrap_or_default()
+        .to_lowercase()
+        .contains("specific and actionable")
+    );
+  }
+
+  #[test]
+  fn agent_policy_allows_specific_research_task() {
+    let task = AgentNodeInput {
+      id: "node_speed1".to_string(),
+      r#type: "speed1".to_string(),
+      title: "Search for SAT study materials and compile a top 10 source list".to_string(),
+      description: "Focus on Algebra and Reading resources with links.".to_string(),
+      status: "todo".to_string(),
+      execution_mode: "Agent".to_string(),
+      priority_weight: Some(0.5),
+      confidence_score: Some(0.5),
+      conflicts: None,
+    };
+    let reason = agent_execution_block_reason(&task, "");
+    assert!(reason.is_none());
+  }
+
+  #[test]
+  fn agent_policy_uses_requested_action_for_subtasks() {
+    let task = AgentNodeInput {
+      id: "node_speed1".to_string(),
+      r#type: "speed1".to_string(),
+      title: "Build pickleball app".to_string(),
+      description: "Ship core v1 quickly".to_string(),
+      status: "todo".to_string(),
+      execution_mode: "Agent".to_string(),
+      priority_weight: Some(0.5),
+      confidence_score: Some(0.5),
+      conflicts: None,
+    };
+    let reason = agent_execution_block_reason(
+      &task,
+      "Search and compile local club contacts for a pilot list",
+    );
+    assert!(reason.is_none());
+  }
 }
 
 fn main() {
@@ -1624,6 +2458,8 @@ fn main() {
     .invoke_handler(tauri::generate_handler![
       chat_with_model,
       run_agent_task,
+      read_agent_result_document,
+      read_agent_run_document,
       reset_model_context
     ])
     .run(tauri::generate_context!())

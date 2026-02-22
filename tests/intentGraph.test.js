@@ -54,6 +54,43 @@ test("computeReward uses progress minus penalties", () => {
   assert.ok(reward.penalty > 0);
 });
 
+test("initializeFromOnboarding strips core identity prefix from root title", () => {
+  const graph = new IntentGraphEngine();
+  graph.initializeFromOnboarding({
+    aboutYourself: "Freshman builder profile",
+    roles: "Core Identity: UC Berkeley freshman / aspiring product builder",
+    currentPriorities: "Ship v1",
+    longTermAmbitions: "Become a founder",
+  });
+
+  const root = graph.getRoot();
+  assert.ok(root);
+  assert.equal(root.title.includes("Core Identity"), false);
+  assert.equal(root.title.includes("core identity"), false);
+});
+
+test("initializeFromOnboarding keeps speed2 and speed1 distinct across hierarchy", () => {
+  const graph = new IntentGraphEngine();
+  graph.initializeFromOnboarding({
+    aboutYourself: "UC Berkeley freshman and aspiring product builder",
+    roles: "UC Berkeley freshman / aspiring product builder",
+    currentPriorities: "become a founder and raise capital",
+    longTermAmbitions: "uc berkeley freshman / aspiring product builder",
+  });
+
+  const root = graph.getRoot();
+  assert.ok(root);
+  const speed2 = graph.getNodesByType(NODE_TYPES.SPEED2);
+  assert.ok(speed2.length > 0);
+  assert.notEqual(speed2[0].title.toLowerCase(), root.title.toLowerCase());
+
+  const speed1 = graph
+    .getNodesByType(NODE_TYPES.SPEED1)
+    .filter((node) => node.parentId === speed2[0].id);
+  assert.ok(speed1.length > 0);
+  assert.notEqual(speed1[0].title.toLowerCase(), speed2[0].title.toLowerCase());
+});
+
 test("addConflict stores conflict metadata on node", () => {
   const graph = new IntentGraphEngine();
   graph.initializeFromOnboarding({

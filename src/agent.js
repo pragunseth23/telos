@@ -13,6 +13,165 @@ const IRREVERSIBLE_KEYWORDS = [
   "enroll",
 ];
 
+const AGENT_RUN_ALLOW_PATTERNS = [
+  /\bsearch\b/,
+  /\bfind\b/,
+  /\bresearch\b/,
+  /\bcompare\b/,
+  /\bsummarize\b/,
+  /\borganize\b/,
+  /\bcollect\b/,
+  /\bgather\b/,
+  /\bcompile\b/,
+  /\bdraft\b/,
+  /\boutline\b/,
+  /\bbrainstorm\b/,
+  /\banaly[sz]e\b/,
+  /\bonline\b/,
+  /\bstudy materials?\b/,
+  /\bresources?\b/,
+];
+
+const AGENT_RUN_ACTION_PATTERNS = [
+  /\bsearch\b/,
+  /\bfind\b/,
+  /\bresearch\b/,
+  /\bcompare\b/,
+  /\bsummarize\b/,
+  /\borganize\b/,
+  /\bcollect\b/,
+  /\bgather\b/,
+  /\bcompile\b/,
+  /\bdraft\b/,
+  /\boutline\b/,
+  /\bbrainstorm\b/,
+  /\banaly[sz]e\b/,
+  /\brank\b/,
+  /\bprioritize\b/,
+];
+
+const AGENT_RUN_SCOPE_PATTERNS = [
+  /\bfor\b/,
+  /\babout\b/,
+  /\bon\b/,
+  /\bfrom\b/,
+  /\bbetween\b/,
+  /\bwithin\b/,
+  /\bacross\b/,
+  /\bnear\b/,
+  /\blocal\b/,
+  /\btop\b/,
+  /\bbest\b/,
+  /\bvs\b/,
+];
+
+const AGENT_RUN_OUTPUT_PATTERNS = [
+  /\blist\b/,
+  /\bshortlist\b/,
+  /\btable\b/,
+  /\bcomparison\b/,
+  /\bsummary\b/,
+  /\bbrief\b/,
+  /\breport\b/,
+  /\bchecklist\b/,
+  /\blinks?\b/,
+  /\bsources?\b/,
+  /\bresources?\b/,
+  /\bstudy materials?\b/,
+  /\bplan\b/,
+  /\boutline\b/,
+];
+
+const AGENT_RUN_BLOCK_PATTERNS = [
+  /\bpractice\b/,
+  /\bplay\b/,
+  /\bworkout\b/,
+  /\bexercise\b/,
+  /\btrain\b/,
+  /\battend\b/,
+  /\bgo to\b/,
+  /\bshow up\b/,
+  /\bcall\b/,
+  /\bmeet\b/,
+  /\btalk to\b/,
+  /\binterview\b/,
+  /\bcook\b/,
+  /\btravel\b/,
+  /\bstudy\b(?!\s+materials?)/,
+  /\bbuild\b/,
+  /\bcode\b/,
+  /\bdevelop\b/,
+  /\bship\b/,
+  /\blaunch\b/,
+];
+
+function evaluateAgentExecutability(taskNode) {
+  if (!taskNode || taskNode.type !== NODE_TYPES.SPEED1) {
+    return {
+      allowed: false,
+      reason: "Only Actions are eligible for agent execution.",
+    };
+  }
+
+  if (taskNode.executionMode === "Human") {
+    return {
+      allowed: false,
+      reason: "Task is labeled Human-executable and cannot be fully automated.",
+    };
+  }
+
+  const normalizedText = `${taskNode.title || ""} ${taskNode.description || ""}`
+    .trim()
+    .toLowerCase();
+
+  const hasAllowSignal = AGENT_RUN_ALLOW_PATTERNS.some((pattern) => pattern.test(normalizedText));
+  if (!hasAllowSignal) {
+    return {
+      allowed: false,
+      reason: "Task is not specific enough for agent automation.",
+    };
+  }
+
+  const hasBlockSignal = AGENT_RUN_BLOCK_PATTERNS.some((pattern) => pattern.test(normalizedText));
+  if (hasBlockSignal) {
+    return {
+      allowed: false,
+      reason: "Task appears to require human or real-world execution.",
+    };
+  }
+
+  const wordCount = normalizedText.split(/\s+/).filter(Boolean).length;
+  const hasActionSignal = AGENT_RUN_ACTION_PATTERNS.some((pattern) =>
+    pattern.test(normalizedText)
+  );
+  if (!hasActionSignal || wordCount < 6) {
+    return {
+      allowed: false,
+      reason:
+        "Task must be specific and actionable: include a concrete research action and clear scope.",
+    };
+  }
+
+  const hasScopeSignal = AGENT_RUN_SCOPE_PATTERNS.some((pattern) =>
+    pattern.test(normalizedText)
+  );
+  const hasOutputSignal = AGENT_RUN_OUTPUT_PATTERNS.some((pattern) =>
+    pattern.test(normalizedText)
+  );
+  const hasNumericScope = /\d/.test(normalizedText);
+  if (!hasScopeSignal && !hasOutputSignal && !hasNumericScope) {
+    return {
+      allowed: false,
+      reason: "Task must specify expected output or explicit scope.",
+    };
+  }
+
+  return {
+    allowed: true,
+    reason: "",
+  };
+}
+
 function estimateTemplate(taskTitle, taskDescription) {
   const text = `${taskTitle || ""} ${taskDescription || ""}`.toLowerCase();
 
@@ -124,7 +283,7 @@ function buildJustification(taskNode, parentNode, advancedNodes) {
 
   const parentLabel = parentNode ? ` under "${parentNode.title}"` : "";
 
-  return `Action executed for Speed-1 node "${taskNode.title}"${parentLabel}. Advanced nodes: ${nodeReferences.join(
+  return `Action executed for "${taskNode.title}"${parentLabel}. Advanced nodes: ${nodeReferences.join(
     ", "
   )}.`;
 }
@@ -148,20 +307,21 @@ export class SingleAgentExecutor {
     if (taskNode.type !== NODE_TYPES.SPEED1) {
       return {
         status: "error",
-        message: `Only Speed-1 tasks are executable. Node type is ${taskNode.type}.`,
+        message: `Only Actions are executable. Node type is ${taskNode.type}.`,
       };
     }
 
-    if (taskNode.executionMode === "Human") {
+    const executionPolicy = evaluateAgentExecutability(taskNode);
+    if (!executionPolicy.allowed) {
       return {
         status: "blocked",
-        message: "Task is labeled Human-executable and cannot be fully automated.",
+        message: executionPolicy.reason,
         log: {
           id: uid("log"),
           taskId,
           status: "blocked",
           createdAt: nowIso(),
-          actionSummary: "Execution blocked by task mode policy.",
+          actionSummary: "Execution blocked by agent eligibility policy.",
           intentAlignmentReport: {
             advancedNodes: [],
             tensionsActivated: [],

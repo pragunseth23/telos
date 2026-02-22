@@ -99,12 +99,12 @@ export function generateAssistantReply({ message, graph, profile, selectedNode }
 
   if (/split|restructure|break down/.test(normalize(message))) {
     responseParts.push(
-      "If you want, I can split one Speed-2 goal into smaller Speed-1 milestones to reduce ambiguity."
+      "If you want, I can split one Goal into smaller Actions to reduce ambiguity."
     );
   }
 
   responseParts.push(
-    "Share one concrete next action and I can encode it as a Speed-1 task with execution mode."
+    "Share one concrete next step and I can encode it as an Action with execution mode."
   );
 
   return {
@@ -131,7 +131,7 @@ export function maybeBuildPeriodicSummary(messages, graph) {
   const recentUpdates = graph.getRecentVersions(3).map((version) => version.reason);
   return {
     title: "Graph Evolution Summary",
-    text: `Top Speed-2 goals: ${topGoals.join(", ")}. Recent graph updates: ${recentUpdates.join(
+    text: `Top Goals: ${topGoals.join(", ")}. Recent graph updates: ${recentUpdates.join(
       " | "
     )}.`,
   };

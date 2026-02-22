@@ -15,13 +15,17 @@ function buildGraph() {
   return graph;
 }
 
-test("agent executes agent/hybrid tasks and emits alignment report", () => {
+test("agent executes explicitly automatable research tasks and emits alignment report", () => {
   const graph = buildGraph();
   const executor = new SingleAgentExecutor();
-  const agentTask =
-    graph
-      .getNodesByType(NODE_TYPES.SPEED1)
-      .find((node) => node.executionMode !== "Human") || graph.getNodesByType(NODE_TYPES.SPEED1)[0];
+  const goal = graph.getNodesByType(NODE_TYPES.SPEED2)[0];
+  const agentTask = graph.addNode({
+    type: NODE_TYPES.SPEED1,
+    parentId: goal.id,
+    title: "Search online for SAT study materials",
+    description: "Compile top prep resources and summarize fit by level",
+    executionMode: "Agent",
+  });
 
   const result = executor.executeTask({
     taskId: agentTask.id,
@@ -34,14 +38,40 @@ test("agent executes agent/hybrid tasks and emits alignment report", () => {
   assert.equal(typeof result.log.intentAlignmentReport.reward, "number");
 });
 
+test("agent blocks non-specific tasks even when mode is Agent", () => {
+  const graph = buildGraph();
+  const executor = new SingleAgentExecutor();
+  const goal = graph.getNodesByType(NODE_TYPES.SPEED2)[0];
+
+  const nonExecutableTask = graph.addNode({
+    type: NODE_TYPES.SPEED1,
+    parentId: goal.id,
+    title: "Build pickleball prototype",
+    description: "Implement and ship the core camera workflow",
+    executionMode: "Agent",
+  });
+
+  const result = executor.executeTask({
+    taskId: nonExecutableTask.id,
+    graph,
+    profile: {},
+  });
+
+  assert.equal(result.status, "blocked");
+  assert.match(result.message, /not specific enough|human|real-world/i);
+});
+
 test("agent blocks human-only tasks", () => {
   const graph = buildGraph();
   const executor = new SingleAgentExecutor();
-  const humanTask = graph
-    .getNodesByType(NODE_TYPES.SPEED1)
-    .find((node) => node.executionMode === "Human");
-
-  assert.ok(humanTask);
+  const goal = graph.getNodesByType(NODE_TYPES.SPEED2)[0];
+  const humanTask = graph.addNode({
+    type: NODE_TYPES.SPEED1,
+    parentId: goal.id,
+    title: "Attend In-Person Pickleball Practice Session",
+    description: "Show up at the local court and complete drills",
+    executionMode: "Human",
+  });
 
   const result = executor.executeTask({
     taskId: humanTask.id,
@@ -60,8 +90,8 @@ test("irreversible actions require approval", () => {
   const task = graph.addNode({
     type: NODE_TYPES.SPEED1,
     parentId: goal.id,
-    title: "Submit college application",
-    description: "Submit final form",
+    title: "Search for scholarship options, compile a shortlist, and submit application online",
+    description: "Provide links and a comparison table, then submit final application form online",
     executionMode: "Agent",
   });
 
